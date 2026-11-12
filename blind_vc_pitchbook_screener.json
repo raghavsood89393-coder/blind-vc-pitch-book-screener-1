@@ -1,0 +1,448 @@
+{
+  "name": "Blind VC Pitch Book Screener",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Startup Funding Request: Upload Your Pitch Book",
+        "formDescription": "Upload your pitch book (PDF or TXT) that states your key numbers. Your application is reviewed blind: names, schools, photos and graphics are never passed to evaluators.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Startup Code",
+              "placeholder": "Optional blind ID, leave empty to auto-generate"
+            },
+            {
+              "fieldLabel": "Founder Name",
+              "requiredField": true,
+              "placeholder": "Used only to scrub your name from the text"
+            },
+            {
+              "fieldLabel": "University",
+              "placeholder": "Used only to scrub it from the text"
+            },
+            {
+              "fieldLabel": "Pitch Book (PDF or TXT)",
+              "fieldType": "file",
+              "requiredField": true,
+              "acceptFileTypes": ".pdf,.txt",
+              "multipleFiles": false
+            }
+          ]
+        },
+        "options": {
+          "formSubmittedText": "Thank you. Your pitch book has been submitted for blind review."
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Founder Uploads Pitch Book",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "blind-vc-pitchbook-screener"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const item = $input.first();\nconst j = item.json;\nconst bin = item.binary || {};\nconst key = Object.keys(bin)[0];\nif (!key) { throw new Error('No pitch book file was received. Upload a PDF or TXT.'); }\nconst f = bin[key];\nconst fname = String(f.fileName || '').toLowerCase();\nconst isPdf = String(f.mimeType || '').includes('pdf') || fname.endsWith('.pdf');\n// Founder identity is kept ONLY here, to be used later for scrubbing. It never reaches the outputs.\nreturn [{\n  json: {\n    founderName: j['Founder Name'] || '',\n    university: j['University'] || '',\n    startupCode: j['Startup Code'] || '',\n    isPdf: isPdf\n  },\n  binary: { data: f }\n}];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Normalize Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.isPdf }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Is PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Read PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "Read TXT Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        720,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const meta = $('Normalize Upload').first().json;\nconst j = $input.first().json;\nlet raw = j.text ?? (j.data && j.data.text) ?? j.data ?? '';\nif (typeof raw !== 'string') { raw = JSON.stringify(raw); }\nraw = raw.replace(/\\r/g, '');\n\n// Only these labelled details are read. Everything else in the pitch book is ignored.\nconst mult = { k: 1e3, thousand: 1e3, m: 1e6, million: 1e6 };\nconst num = (labels) => {\n  const L = labels.map(l => l.replace(/ /g, '\\\\s+')).join('|');\n  const re = new RegExp('(?:' + L + ')\\\\s*[:\\\\-=]?\\\\s*(?:USD|US\\\\$|\\\\$)?\\\\s*([0-9][0-9,]*(?:\\\\.[0-9]+)?)\\\\s*(k|m|million|thousand)?\\\\b', 'i');\n  const m = raw.match(re);\n  if (!m) return null;\n  let v = Number(m[1].replace(/,/g, ''));\n  if (m[2]) v = v * mult[m[2].toLowerCase()];\n  return v;\n};\n\nconst rev   = num(['Monthly Revenue', 'Monthly Recurring Revenue', 'MRR']);\nconst cost  = num(['Monthly Costs', 'Monthly Expenses']);\nconst u0    = num(['Users Last Month', 'Previous Month Users']);\nconst u1    = num(['Users This Month', 'Current Users']);\nconst cash  = num(['Cash in Bank', 'Cash Balance', 'Cash on Hand']);\nconst ask   = num(['Funding Ask', 'Funding Request', 'Amount Raising']);\n\nlet industry = 'Other';\nconst im = raw.match(/Industry\\s*[:\\-]\\s*([A-Za-z][A-Za-z &\\/]{1,30})/i);\nif (im) {\n  const s = im[1].toLowerCase();\n  const known = ['SaaS', 'Fintech', 'Health', 'Consumer', 'Hardware'];\n  industry = known.find(k => s.includes(k.toLowerCase())) || 'Other';\n}\n\nlet desc = '';\nconst hm = raw.match(/(business summary|about the business|what we do)\\s*:?\\s*/i);\nif (hm) {\n  let t = raw.slice(hm.index + hm[0].length);\n  const stop = t.search(/\\n\\s*(team|founders?|key metrics|traction|financials|funding|contact|the ask)\\b/i);\n  if (stop > 0) t = t.slice(0, stop);\n  desc = t.replace(/\\s+/g, ' ').trim().slice(0, 900);\n}\n\nconst fields = { 'Monthly Revenue': rev, 'Monthly Costs': cost, 'Users Last Month': u0, 'Users This Month': u1, 'Cash in Bank': cash, 'Funding Ask': ask };\nconst missing = Object.keys(fields).filter(k => fields[k] === null);\nconst code = String(meta.startupCode || '').trim() || ('BLIND-' + Date.now().toString(36).toUpperCase());\n\nreturn [{ json: {\n  received_at: new Date().toISOString(),\n  startup_code: code,\n  industry: industry,\n  rev: rev, cost: cost, u0: u0, u1: u1, cash: cash, ask: ask,\n  description_raw: desc,\n  missing: missing,\n  missing_count: missing.length,\n  all_found: missing.length === 0\n} }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Extract Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000002",
+              "leftValue": "={{ $json.all_found }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000007",
+      "name": "All Metrics Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const d = $input.first().json;\nconst meta = $('Normalize Upload').first().json;\nconst escRe = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\nlet text = String(d.description_raw || '');\nlet removed = 0;\nconst rep = (re, tag) => { text = text.replace(re, () => { removed++; return tag; }); };\n\n// names of the founder\nString(meta.founderName || '').split(/\\s+/).map(t => t.replace(/[^a-zA-Z]/g, '')).filter(t => t.length > 2)\n  .forEach(t => rep(new RegExp('\\\\b' + escRe(t) + '\\\\b', 'gi'), '[NAME REMOVED]'));\n// university\nconst uni = String(meta.university || '').replace(/[^a-zA-Z ]/g, '').trim();\nif (uni.length > 2) { rep(new RegExp(escRe(uni), 'gi'), '[SCHOOL REMOVED]'); }\n// links, emails, handles\nrep(/https?:\\/\\/[^\\s]+/gi, '[LINK REMOVED]');\nrep(/www\\.[^\\s]+/gi, '[LINK REMOVED]');\nrep(/[^\\s]+@[^\\s]+/g, '[EMAIL REMOVED]');\nrep(/@[A-Za-z0-9_]{2,}/g, '[HANDLE REMOVED]');\n// pedigree and prestige\nrep(/(harvard|stanford|oxford|cambridge|princeton|yale|columbia|berkeley|wharton|insead|caltech|y combinator|ycombinator|ex-google|ex-meta|ex-apple|ex-amazon|ex-microsoft|ex-mckinsey|forbes 30|techcrunch|ivy league)/gi, '[PEDIGREE REMOVED]');\nrep(/\\b(MIT|IIT|IIM)\\b/g, '[PEDIGREE REMOVED]');\n// hype\nrep(/(world-class|visionary|revolutionary|disruptive|passionate|unicorn|rockstar|game-changing|game changer|cutting-edge|best-in-class)/gi, '[HYPE REMOVED]');\n\nreturn [{ json: { ...d, description_raw: undefined, blind_description: text || '(no description provided)', redactions_made: removed } }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000008",
+      "name": "Redact Identity & Hype",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const d = $input.first().json;\nconst clamp = (v, a, b) => Math.min(Math.max(v, a), b);\nconst r1 = v => Math.round(v * 10) / 10;\n\nconst rev = d.rev, cost = d.cost, u0 = d.u0, u1 = d.u1, cash = d.cash, ask = d.ask;\nconst burn = Math.max(cost - rev, 0);\nconst margin = rev > 0 ? ((rev - cost) / rev) * 100 : -100;\nconst growth = u0 > 0 ? ((u1 - u0) / u0) * 100 : 0;\nconst runway = burn === 0 ? 99 : cash / burn;\nconst askMult = rev > 0 ? ask / (rev * 12) : 99;\n\nconst sGrowth = clamp(growth / 20, 0, 1) * 30;\nconst sMargin = clamp((margin + 100) / 100, 0, 1) * 25;\nconst sRunway = clamp(runway / 18, 0, 1) * 25;\nconst sAsk = clamp((15 - askMult) / 12, 0, 1) * 20;\nconst total = Math.round(sGrowth + sMargin + sRunway + sAsk);\nconst verdict = total >= 70 ? 'ADVANCE' : total >= 45 ? 'REVIEW' : 'DECLINE';\n\nreturn [{ json: {\n  received_at: d.received_at,\n  startup_code: d.startup_code,\n  industry: d.industry,\n  monthly_revenue: rev,\n  monthly_costs: cost,\n  net_monthly_burn: burn,\n  profit_margin_pct: r1(margin),\n  users_last_month: u0,\n  users_this_month: u1,\n  user_growth_mom_pct: r1(growth),\n  cash_in_bank: cash,\n  runway_months: runway >= 99 ? 'Profitable' : r1(runway),\n  funding_ask: ask,\n  ask_to_annual_revenue_x: askMult >= 99 ? 'n/a' : r1(askMult),\n  score_growth_30: r1(sGrowth),\n  score_margin_25: r1(sMargin),\n  score_runway_25: r1(sRunway),\n  score_ask_20: r1(sAsk),\n  total_score_100: total,\n  verdict: verdict,\n  missing_fields: '',\n  redactions_made: d.redactions_made,\n  blind_description: d.blind_description\n} }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000009",
+      "name": "Score Startup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const d = $input.first().json;\nconst v = x => (x === null || x === undefined) ? '' : x;\nreturn [{ json: {\n  received_at: d.received_at,\n  startup_code: d.startup_code,\n  industry: d.industry,\n  monthly_revenue: v(d.rev),\n  monthly_costs: v(d.cost),\n  net_monthly_burn: '',\n  profit_margin_pct: '',\n  users_last_month: v(d.u0),\n  users_this_month: v(d.u1),\n  user_growth_mom_pct: '',\n  cash_in_bank: v(d.cash),\n  runway_months: '',\n  funding_ask: v(d.ask),\n  ask_to_annual_revenue_x: '',\n  score_growth_30: '',\n  score_margin_25: '',\n  score_runway_25: '',\n  score_ask_20: '',\n  total_score_100: 0,\n  verdict: 'INCOMPLETE',\n  missing_fields: d.missing.join(', '),\n  redactions_made: 0,\n  blind_description: '(not scored: required details missing from the pitch book)'\n} }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000010",
+      "name": "Mark Incomplete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const r = $input.first().json;\nconst esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst money = x => (x === '' ? '-' : '$' + x);\nconst rows = [\n  ['Industry', r.industry],\n  ['Monthly Revenue', money(r.monthly_revenue)],\n  ['Monthly Costs', money(r.monthly_costs)],\n  ['Net Monthly Burn', r.net_monthly_burn === '' ? '-' : '$' + r.net_monthly_burn],\n  ['Profit Margin', r.profit_margin_pct === '' ? '-' : r.profit_margin_pct + '%'],\n  ['Users Last Month', r.users_last_month === '' ? '-' : r.users_last_month],\n  ['Users This Month', r.users_this_month === '' ? '-' : r.users_this_month],\n  ['User Growth (MoM)', r.user_growth_mom_pct === '' ? '-' : r.user_growth_mom_pct + '%'],\n  ['Cash in Bank', money(r.cash_in_bank)],\n  ['Runway (months)', r.runway_months === '' ? '-' : r.runway_months],\n  ['Funding Ask', money(r.funding_ask)],\n  ['Ask / Annual Revenue', r.ask_to_annual_revenue_x === '' ? '-' : r.ask_to_annual_revenue_x + 'x']\n];\nconst scoreRows = [\n  ['Growth (max 30)', r.score_growth_30],\n  ['Margin (max 25)', r.score_margin_25],\n  ['Runway (max 25)', r.score_runway_25],\n  ['Ask efficiency (max 20)', r.score_ask_20]\n];\nconst tr = a => '<tr><th>' + esc(a[0]) + '</th><td>' + esc(a[1]) + '</td></tr>';\nconst incomplete = r.verdict === 'INCOMPLETE';\n\nconst html = '<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>' + esc(r.startup_code) + '</title>' +\n  '<style>body{font-family:Arial,sans-serif;color:#000;background:#fff;max-width:720px;margin:30px auto}' +\n  'h1,h2{border-bottom:2px solid #000;padding-bottom:4px}table{border-collapse:collapse;width:100%;margin-bottom:20px}' +\n  'th,td{border:1px solid #000;padding:6px 10px;text-align:left}th{width:45%;background:#eee}' +\n  '.score{font-size:28px;font-weight:bold;border:3px solid #000;padding:10px;text-align:center}' +\n  '.warn{border:3px double #000;padding:10px;font-weight:bold}</style></head><body>' +\n  '<h1>BLIND SCORESHEET: ' + esc(r.startup_code) + '</h1>' +\n  '<p>Received: ' + esc(r.received_at) + '</p>' +\n  (incomplete ? '<div class=\"warn\">INCOMPLETE: the pitch book did not state: ' + esc(r.missing_fields) + '</div>' : '') +\n  '<h2>Business Metrics</h2><table>' + rows.map(tr).join('') + '</table>' +\n  (incomplete ? '' : '<h2>Scoring</h2><table>' + scoreRows.map(tr).join('') + '</table>') +\n  '<div class=\"score\">TOTAL: ' + r.total_score_100 + ' / 100 &mdash; ' + esc(r.verdict) + '</div>' +\n  '<h2>Business Summary (redacted)</h2><p>' + esc(r.blind_description) + '</p>' +\n  '<p><small>Redactions made: ' + esc(r.redactions_made) + '. Photos, graphics, names, schools, links and hype language were never copied from the pitch book. Judged on numbers only.</small></p></body></html>';\n\nreturn [{ json: { ...r, fileBase: r.startup_code, html: html } }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000011",
+      "name": "Render Blind Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ $json.fileBase }}_scoresheet.html"
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000012",
+      "name": "Build B&W Sheet (HTML)",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2160,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const { html, fileBase, ...rest } = $input.first().json;\nreturn [{ json: rest }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000013",
+      "name": "Prepare CSV Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ $json.fileBase }}_scoresheet.csv"
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000014",
+      "name": "Build CSV",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2400,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Blind VC Pitch Book Screener\n1. Founder uploads PDF/TXT pitch book\n2. Only labelled numbers are read (Monthly Revenue, Monthly Costs, Users Last Month, Users This Month, Cash in Bank, Funding Ask, Industry, Business Summary)\n3. Names, schools, links, hype are redacted\n4. Scored on numbers only\n5. Download the HTML + CSV from the last two nodes: Output > Binary > Download",
+        "height": 220,
+        "width": 420
+      },
+      "id": "b2000000-0000-4000-8000-000000000015",
+      "name": "Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        60
+      ]
+    }
+  ],
+  "connections": {
+    "Founder Uploads Pitch Book": {
+      "main": [
+        [
+          {
+            "node": "Normalize Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Upload": {
+      "main": [
+        [
+          {
+            "node": "Is PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is PDF?": {
+      "main": [
+        [
+          {
+            "node": "Read PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read TXT Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Extract Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read TXT Text": {
+      "main": [
+        [
+          {
+            "node": "Extract Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Metrics": {
+      "main": [
+        [
+          {
+            "node": "All Metrics Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All Metrics Found?": {
+      "main": [
+        [
+          {
+            "node": "Redact Identity & Hype",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Incomplete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redact Identity & Hype": {
+      "main": [
+        [
+          {
+            "node": "Score Startup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Startup": {
+      "main": [
+        [
+          {
+            "node": "Render Blind Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Incomplete": {
+      "main": [
+        [
+          {
+            "node": "Render Blind Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Blind Sheet": {
+      "main": [
+        [
+          {
+            "node": "Build B&W Sheet (HTML)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare CSV Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CSV Row": {
+      "main": [
+        [
+          {
+            "node": "Build CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}
